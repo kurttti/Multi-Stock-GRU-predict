@@ -8,8 +8,25 @@ class StockPredictionApp {
         this.currentPredictions = null;
         this.accuracyChart = null;
         this.isTraining = false;
-        
+
+        // prepare TF backend immediately
+        this.tfReadyPromise = this.setupTF();
+
         this.initializeEventListeners();
+    }
+
+    async setupTF() {
+        try {
+            // prefer WebGL for speed; fallback to CPU if not available
+            await tf.setBackend('webgl').catch(() => tf.setBackend('cpu'));
+            await tf.ready();
+            const info = `TFJS ${tf.version_core} | backend: ${tf.getBackend()}`;
+            const el = document.getElementById('backendInfo');
+            if (el) el.textContent = info;
+            console.log(info);
+        } catch (e) {
+            console.warn('TFJS init failed', e);
+        }
     }
 
     initializeEventListeners() {
@@ -27,6 +44,8 @@ class StockPredictionApp {
         if (!file) return;
 
         try {
+            await this.tfReadyPromise;
+
             document.getElementById('status').textContent = 'Loading CSV...';
             await this.dataLoader.loadCSV(file);
             
@@ -44,6 +63,7 @@ class StockPredictionApp {
 
     async trainModel() {
         if (this.isTraining) return;
+        await this.tfReadyPromise;
         
         this.isTraining = true;
         document.getElementById('trainBtn').disabled = true;
@@ -52,16 +72,13 @@ class StockPredictionApp {
         try {
             const { X_train, y_train, X_test, y_test, symbols } = this.dataLoader;
 
-            // Determine the number of input features per stock from the data loader.
-            // This allows dynamic handling when additional features are added.
-            const numFeatures = this.dataLoader.numFeaturesPerStock || 2;
+            const numFeatures = this.dataLoader.numFeaturesPerStock || 2; // 6 with new features
             this.model = new GRUModel([12, symbols.length * numFeatures], symbols.length * 3);
-
+            
             document.getElementById('status').textContent = 'Training model...';
-
-            // Increase epochs slightly to allow the deeper network to converge.
+            // a few extra epochs, browser-friendly
             await this.model.train(X_train, y_train, X_test, y_test, 60, 32);
-
+            
             document.getElementById('predictBtn').disabled = false;
             document.getElementById('status').textContent = 'Training completed. Click Run Prediction to evaluate.';
             
@@ -90,10 +107,7 @@ class StockPredictionApp {
             this.visualizeResults(evaluation, symbols);
             
             document.getElementById('status').textContent = 'Prediction completed. Results displayed below.';
-            
-            // Clean up tensors
             predictions.dispose();
-            
         } catch (error) {
             document.getElementById('status').textContent = `Prediction error: ${error.message}`;
             console.error(error);
@@ -101,25 +115,17 @@ class StockPredictionApp {
     }
 
     visualizeResults(evaluation, symbols) {
-        // Draw bar chart of accuracies and prediction timelines. The accuracies
-        // are used to determine which stocks to highlight in the timeline.
         this.createAccuracyChart(evaluation.stockAccuracies, symbols);
         this.createTimelineCharts(evaluation.stockPredictions, evaluation.stockAccuracies);
     }
 
     createAccuracyChart(accuracies, symbols) {
         const ctx = document.getElementById('accuracyChart').getContext('2d');
-        
-        // Sort stocks by accuracy
-        const sortedEntries = Object.entries(accuracies)
-            .sort(([,a], [,b]) => b - a);
-        
+        const sortedEntries = Object.entries(accuracies).sort(([,a], [,b]) => b - a);
         const sortedSymbols = sortedEntries.map(([symbol]) => symbol);
-        const sortedAccuracies = sortedEntries.map(([, accuracy]) => accuracy * 100);
+        const sortedAccuracies = sortedEntries.map(([, acc]) => acc * 100);
 
-        if (this.accuracyChart) {
-            this.accuracyChart.destroy();
-        }
+        if (this.accuracyChart) this.accuracyChart.destroy();
 
         this.accuracyChart = new Chart(ctx, {
             type: 'bar',
@@ -128,41 +134,17 @@ class StockPredictionApp {
                 datasets: [{
                     label: 'Prediction Accuracy (%)',
                     data: sortedAccuracies,
-                    backgroundColor: sortedAccuracies.map(acc => 
-                        acc > 60 ? 'rgba(75, 192, 192, 0.8)' : 
-                        acc > 50 ? 'rgba(255, 205, 86, 0.8)' : 
-                        'rgba(255, 99, 132, 0.8)'
-                    ),
-                    borderColor: sortedAccuracies.map(acc => 
-                        acc > 60 ? 'rgb(75, 192, 192)' : 
-                        acc > 50 ? 'rgb(255, 205, 86)' : 
-                        'rgb(255, 99, 132)'
-                    ),
+                    backgroundColor: 'rgba(75, 192, 192, 0.8)',
+                    borderColor: 'rgb(75, 192, 192)',
                     borderWidth: 1
                 }]
             },
             options: {
                 indexAxis: 'y',
                 scales: {
-                    x: {
-                        beginAtZero: true,
-                        max: 100,
-                        title: {
-                            display: true,
-                            text: 'Accuracy (%)'
-                        }
-                    }
+                    x: { beginAtZero: true, max: 100, title: { display: true, text: 'Accuracy (%)' } }
                 },
-                plugins: {
-                    legend: {
-                        display: false
-                    },
-                    tooltip: {
-                        callbacks: {
-                            label: (context) => `Accuracy: ${context.raw.toFixed(2)}%`
-                        }
-                    }
-                }
+                plugins: { legend: { display: false } }
             }
         });
     }
@@ -171,68 +153,46 @@ class StockPredictionApp {
         const container = document.getElementById('timelineContainer');
         container.innerHTML = '';
 
-        // Determine the top 3 stocks by accuracy. This ensures the most
-        // informative timelines are displayed. If accuracies are not
-        // provided (e.g. during development), fall back to the original order.
-        let topStocks;
-        if (accuracies) {
-            const sortedByAcc = Object.entries(accuracies)
-                .sort(([, a], [, b]) => b - a)
-                .map(([sym]) => sym);
-            topStocks = sortedByAcc.slice(0, 3);
-        } else {
-            topStocks = Object.keys(predictions).slice(0, 3);
-        }
+        const topStocks = Object.entries(accuracies)
+            .sort(([,a], [,b]) => b - a)
+            .map(([s]) => s)
+            .slice(0, 3);
 
         topStocks.forEach(symbol => {
-            const stockPredictions = predictions[symbol];
-            if (!stockPredictions) return;
+            const stockPredictions = predictions[symbol] || [];
             const chartContainer = document.createElement('div');
             chartContainer.className = 'stock-chart';
             chartContainer.innerHTML = `<h4>${symbol} Prediction Timeline</h4><canvas id="timeline-${symbol}"></canvas>`;
             container.appendChild(chartContainer);
 
             const ctx = document.getElementById(`timeline-${symbol}`).getContext('2d');
-
-            // Sample first 50 predictions for cleaner visualization
             const sampleSize = Math.min(50, stockPredictions.length);
             const sampleData = stockPredictions.slice(0, sampleSize);
-
             const correctData = sampleData.map(p => p.correct ? 1 : 0);
-            const labels = sampleData.map((_, i) => `Pred ${i + 1}`);
+            const labels = sampleData.map((_, i) => `#${i + 1}`);
 
             new Chart(ctx, {
                 type: 'line',
                 data: {
-                    labels: labels,
+                    labels,
                     datasets: [{
-                        label: 'Correct Predictions',
+                        label: 'Correct(1)/Wrong(0)',
                         data: correctData,
                         borderColor: 'rgb(75, 192, 192)',
                         backgroundColor: 'rgba(75, 192, 192, 0.2)',
                         fill: true,
                         tension: 0.4,
-                        pointBackgroundColor: sampleData.map(p =>
-                            p.correct ? 'rgb(75, 192, 192)' : 'rgb(255, 99, 132)'
-                        )
+                        pointBackgroundColor: sampleData.map(p => p.correct ? 'rgb(75, 192, 192)' : 'rgb(255, 99, 132)')
                     }]
                 },
                 options: {
-                    scales: {
-                        y: {
-                            min: 0,
-                            max: 1,
-                            ticks: {
-                                callback: (value) => value === 1 ? 'Correct' : value === 0 ? 'Wrong' : ''
-                            }
-                        }
-                    },
+                    scales: { y: { min: 0, max: 1, ticks: { callback: v => (v === 1 ? 'Correct' : v === 0 ? 'Wrong' : '') } } },
                     plugins: {
                         tooltip: {
                             callbacks: {
-                                label: (context) => {
-                                    const pred = sampleData[context.dataIndex];
-                                    return `Prediction: ${pred.pred === 1 ? 'Up' : 'Down'}, Actual: ${pred.true === 1 ? 'Up' : 'Down'}`;
+                                label: (ctx) => {
+                                    const pred = sampleData[ctx.dataIndex];
+                                    return `Pred: ${pred.pred ? 'Up' : 'Down'} | Actual: ${pred.true ? 'Up' : 'Down'}`;
                                 }
                             }
                         }
@@ -249,7 +209,4 @@ class StockPredictionApp {
     }
 }
 
-// Initialize app when DOM is loaded
-document.addEventListener('DOMContentLoaded', () => {
-    new StockPredictionApp();
-});
+document.addEventListener('DOMContentLoaded', () => new StockPredictionApp());
