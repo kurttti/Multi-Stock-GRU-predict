@@ -9,11 +9,7 @@ class DataLoader {
         this.X_test = null;
         this.y_test = null;
         this.testDates = [];
-        // track how many features per stock we expose to the model. The original
-        // implementation only used Open and Close (2 features). We will later
-        // populate this value based on the normalized feature keys. This is
-        // consumed by the app when determining the input shape for the GRU.
-        this.numFeaturesPerStock = 0;
+        this.numFeaturesPerStock = 0; // dynamically set after normalize
     }
 
     async loadCSV(file) {
@@ -41,7 +37,6 @@ class DataLoader {
         const symbols = new Set();
         const dates = new Set();
 
-        // Parse all rows
         for (let i = 1; i < lines.length; i++) {
             const values = lines[i].split(',');
             if (values.length !== headers.length) continue;
@@ -80,11 +75,7 @@ class DataLoader {
         this.normalizedData = {};
         const minMax = {};
 
-        // Calculate min and max per stock for each feature. In addition to
-        // Open and Close we now also include High, Low, Volume and a derived
-        // Return feature ((Close - Open) / Open). Performing per-stock
-        // normalisation helps the model learn relative movements while
-        // preserving relationships across stocks.
+        // Per-stock min/max for Open/Close/High/Low/Volume + derived Return
         this.symbols.forEach(symbol => {
             minMax[symbol] = {
                 Open: { min: Infinity, max: -Infinity },
@@ -96,144 +87,100 @@ class DataLoader {
             };
 
             this.dates.forEach(date => {
-                const point = this.stocksData[symbol][date];
-                if (point) {
-                    // update raw min/max for direct price/volume features
-                    minMax[symbol].Open.min = Math.min(minMax[symbol].Open.min, point.Open);
-                    minMax[symbol].Open.max = Math.max(minMax[symbol].Open.max, point.Open);
-                    minMax[symbol].Close.min = Math.min(minMax[symbol].Close.min, point.Close);
-                    minMax[symbol].Close.max = Math.max(minMax[symbol].Close.max, point.Close);
-                    minMax[symbol].High.min = Math.min(minMax[symbol].High.min, point.High);
-                    minMax[symbol].High.max = Math.max(minMax[symbol].High.max, point.High);
-                    minMax[symbol].Low.min = Math.min(minMax[symbol].Low.min, point.Low);
-                    minMax[symbol].Low.max = Math.max(minMax[symbol].Low.max, point.Low);
-                    minMax[symbol].Volume.min = Math.min(minMax[symbol].Volume.min, point.Volume);
-                    minMax[symbol].Volume.max = Math.max(minMax[symbol].Volume.max, point.Volume);
-
-                    // compute return value for min/max tracking. We protect
-                    // against division by zero by checking Open > 0. If Open is
-                    // 0 (unlikely in real stock data), we set the return to 0.
-                    const ret = point.Open !== 0 ? (point.Close - point.Open) / point.Open : 0;
-                    minMax[symbol].Return.min = Math.min(minMax[symbol].Return.min, ret);
-                    minMax[symbol].Return.max = Math.max(minMax[symbol].Return.max, ret);
-                }
+                const p = this.stocksData[symbol][date];
+                if (!p) return;
+                minMax[symbol].Open.min = Math.min(minMax[symbol].Open.min, p.Open);
+                minMax[symbol].Open.max = Math.max(minMax[symbol].Open.max, p.Open);
+                minMax[symbol].Close.min = Math.min(minMax[symbol].Close.min, p.Close);
+                minMax[symbol].Close.max = Math.max(minMax[symbol].Close.max, p.Close);
+                minMax[symbol].High.min = Math.min(minMax[symbol].High.min, p.High);
+                minMax[symbol].High.max = Math.max(minMax[symbol].High.max, p.High);
+                minMax[symbol].Low.min = Math.min(minMax[symbol].Low.min, p.Low);
+                minMax[symbol].Low.max = Math.max(minMax[symbol].Low.max, p.Low);
+                minMax[symbol].Volume.min = Math.min(minMax[symbol].Volume.min, p.Volume);
+                minMax[symbol].Volume.max = Math.max(minMax[symbol].Volume.max, p.Volume);
+                const ret = p.Open !== 0 ? (p.Close - p.Open) / p.Open : 0;
+                minMax[symbol].Return.min = Math.min(minMax[symbol].Return.min, ret);
+                minMax[symbol].Return.max = Math.max(minMax[symbol].Return.max, ret);
             });
         });
 
-        // Normalize data. We map each feature into [0,1]. For returns,
-        // negative values are handled by the min/max range; features with
-        // constant values (max == min) are set to 0 to avoid NaN.
+        // Normalize to [0,1] (constant-range -> 0)
         this.symbols.forEach(symbol => {
             this.normalizedData[symbol] = {};
             this.dates.forEach(date => {
-                const point = this.stocksData[symbol][date];
-                if (point) {
-                    const ret = point.Open !== 0 ? (point.Close - point.Open) / point.Open : 0;
-                    const norm = {};
-                    ['Open', 'Close', 'High', 'Low', 'Volume'].forEach(key => {
-                        const denom = minMax[symbol][key].max - minMax[symbol][key].min;
-                        norm[key] = denom === 0 ? 0 : (point[key] - minMax[symbol][key].min) / denom;
-                    });
-                    // normalise return separately
-                    const denomReturn = minMax[symbol].Return.max - minMax[symbol].Return.min;
-                    norm.Return = denomReturn === 0 ? 0 : (ret - minMax[symbol].Return.min) / denomReturn;
+                const p = this.stocksData[symbol][date];
+                if (!p) return;
+                const norm = {};
+                ['Open','Close','High','Low','Volume'].forEach(key => {
+                    const denom = (minMax[symbol][key].max - minMax[symbol][key].min);
+                    norm[key] = denom === 0 ? 0 : (p[key] - minMax[symbol][key].min) / denom;
+                });
+                const ret = p.Open !== 0 ? (p.Close - p.Open) / p.Open : 0;
+                const denomR = (minMax[symbol].Return.max - minMax[symbol].Return.min);
+                norm.Return = denomR === 0 ? 0 : (ret - minMax[symbol].Return.min) / denomR;
 
-                    this.normalizedData[symbol][date] = norm;
-                }
+                this.normalizedData[symbol][date] = norm;
             });
         });
 
-        // update feature count for downstream modules
-        this.numFeaturesPerStock = Object.keys(this.normalizedData[this.symbols[0]][this.dates[0]]).length;
-
+        this.numFeaturesPerStock = Object.keys(this.normalizedData[this.symbols[0]][this.dates[0]]).length; // 6
         return this.normalizedData;
     }
 
     createSequences(sequenceLength = 12, predictionHorizon = 3) {
-        // Ensure normalization has been executed so that this.normalizedData and
-        // this.numFeaturesPerStock are populated. If normalizeData() hasn't
-        // been called yet then it will be invoked here.
         if (!this.normalizedData) this.normalizeData();
 
         const sequences = [];
         const targets = [];
         const validDates = [];
 
-        // Iterate over all possible sequence starting points. We stop
-        // predictionHorizon days before the end of the time series to ensure
-        // future target dates exist.
         for (let i = sequenceLength; i < this.dates.length - predictionHorizon; i++) {
             const currentDate = this.dates[i];
             const sequenceData = [];
-            let validSequence = true;
+            let valid = true;
 
-            // Build a sequence of length `sequenceLength` for each time step. We
-            // iterate backwards from the current index so that the earliest
-            // data point appears first in the resulting sequence array.
+            // Build 12-day window (earliest -> latest)
             for (let j = sequenceLength - 1; j >= 0; j--) {
                 const seqDate = this.dates[i - j];
-                const timeStepData = [];
-
+                const step = [];
                 this.symbols.forEach(symbol => {
-                    const normPoint = this.normalizedData[symbol][seqDate];
-                    if (normPoint) {
-                        // Append all available features for this stock at this
-                        // date. The order here must match the order used in
-                        // normalization above (Open, Close, High, Low, Volume, Return).
-                        timeStepData.push(
-                            normPoint.Open,
-                            normPoint.Close,
-                            normPoint.High,
-                            normPoint.Low,
-                            normPoint.Volume,
-                            normPoint.Return
-                        );
-                    } else {
-                        validSequence = false;
-                    }
+                    const n = this.normalizedData[symbol][seqDate];
+                    if (!n) { valid = false; return; }
+                    // feature order must stay stable:
+                    step.push(n.Open, n.Close, n.High, n.Low, n.Volume, n.Return);
                 });
-
-                if (validSequence) sequenceData.push(timeStepData);
+                if (valid) sequenceData.push(step);
             }
 
-            // Create target labels only if the sequence was valid. We compare
-            // the close price on the currentDate with the close price at
-            // future offsets to generate binary labels per stock.
-            if (validSequence) {
-                const target = [];
-                const baseClosePrices = [];
-                this.symbols.forEach(symbol => {
-                    baseClosePrices.push(this.stocksData[symbol][currentDate].Close);
+            if (!valid) continue;
+
+            // Targets: for each stock, compare Close at future offsets to Close at D
+            const baseClose = this.symbols.map(sym => this.stocksData[sym][currentDate].Close);
+            const tgt = [];
+            for (let offset = 1; offset <= predictionHorizon; offset++) {
+                const fDate = this.dates[i + offset];
+                this.symbols.forEach((sym, idx) => {
+                    const f = this.stocksData[sym][fDate];
+                    if (!f) { valid = false; return; }
+                    tgt.push(f.Close > baseClose[idx] ? 1 : 0);
                 });
-
-                for (let offset = 1; offset <= predictionHorizon; offset++) {
-                    const futureDate = this.dates[i + offset];
-                    this.symbols.forEach((symbol, idx) => {
-                        const futureClose = this.stocksData[symbol][futureDate]?.Close;
-                        if (futureClose !== undefined) {
-                            target.push(futureClose > baseClosePrices[idx] ? 1 : 0);
-                        } else {
-                            validSequence = false;
-                        }
-                    });
-                }
-
-                if (validSequence) {
-                    sequences.push(sequenceData);
-                    targets.push(target);
-                    validDates.push(currentDate);
-                }
+                if (!valid) break;
             }
+            if (!valid) continue;
+
+            sequences.push(sequenceData);
+            targets.push(tgt);
+            validDates.push(currentDate);
         }
 
-        // Split into train/test sets chronologically. A typical 80/20 split is
-        // used to respect temporal ordering and prevent data leakage.
-        const splitIndex = Math.floor(sequences.length * 0.8);
-        this.X_train = tf.tensor3d(sequences.slice(0, splitIndex));
-        this.y_train = tf.tensor2d(targets.slice(0, splitIndex));
-        this.X_test = tf.tensor3d(sequences.slice(splitIndex));
-        this.y_test = tf.tensor2d(targets.slice(splitIndex));
-        this.testDates = validDates.slice(splitIndex);
+        // chronological 80/20 split
+        const split = Math.floor(sequences.length * 0.8);
+        this.X_train = tf.tensor3d(sequences.slice(0, split));
+        this.y_train = tf.tensor2d(targets.slice(0, split));
+        this.X_test  = tf.tensor3d(sequences.slice(split));
+        this.y_test  = tf.tensor2d(targets.slice(split));
+        this.testDates = validDates.slice(split);
 
         console.log(`Created ${sequences.length} sequences`);
         console.log(`Training: ${this.X_train.shape[0]}, Test: ${this.X_test.shape[0]}`);
@@ -251,8 +198,8 @@ class DataLoader {
     dispose() {
         if (this.X_train) this.X_train.dispose();
         if (this.y_train) this.y_train.dispose();
-        if (this.X_test) this.X_test.dispose();
-        if (this.y_test) this.y_test.dispose();
+        if (this.X_test)  this.X_test.dispose();
+        if (this.y_test)  this.y_test.dispose();
     }
 }
 
