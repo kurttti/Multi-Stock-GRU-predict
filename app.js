@@ -54,7 +54,7 @@ class StockPredictionApp {
             this.model = new GRUModel([12, symbols.length * numFeatures], symbols.length * 3);
 
             this.updateStatus('Training model...');
-            await this.model.train(X_train, y_train, X_test, y_test, 12, 64); // fast defaults
+            await this.model.train(X_train, y_train, X_test, y_test, 20, 64); // fast defaults
             document.getElementById('predictBtn').disabled = false;
             this.updateStatus('Training completed. Click Run Prediction to evaluate.');
         } catch (error) {
