@@ -8,6 +8,7 @@ class GRUModel {
         this._minEpochs = 10; // don't stop before this
     }
 
+    // Early stopping on val_binaryAccuracy
     _makeEarlyStop(patience = 6) {
         let best = -Infinity, wait = 0;
         let epochCount = 0;
@@ -23,33 +24,30 @@ class GRUModel {
         };
     }
 
-    _makeLRSchedule(totalEpochs, lrStart = 0.0015, lrEnd = 0.0003) {
-        return {
-            onEpochBegin: (epoch) => {
-                const t = epoch / Math.max(1, totalEpochs - 1);
-                // cosine decay
-                const lr = lrEnd + 0.5 * (lrStart - lrEnd) * (1 + Math.cos(Math.PI * t));
-                this.model.optimizer.setLearningRate(lr);
-            }
-        };
-    }
-
     buildModel() {
-        // Stacked GRU → Dense(30 sigmoid) per spec; slightly larger for accuracy
+        // Spec: stacked GRU → Dense(30, sigmoid)
         const layers = [];
         layers.push(tf.layers.gru({
-            units: 48, returnSequences: true, inputShape: this.inputShape,
-            dropout: 0.1, recurrentDropout: 0.05
+            units: 48,
+            returnSequences: true,
+            inputShape: this.inputShape,
+            dropout: 0.1,
+            recurrentDropout: 0.05
         }));
         layers.push(tf.layers.gru({
-            units: 24, returnSequences: false,
-            dropout: 0.1, recurrentDropout: 0.05
+            units: 24,
+            returnSequences: false,
+            dropout: 0.1,
+            recurrentDropout: 0.05
         }));
-        layers.push(tf.layers.dense({ units: this.outputSize, activation: 'sigmoid' }));
+        layers.push(tf.layers.dense({
+            units: this.outputSize,
+            activation: 'sigmoid'
+        }));
 
         this.model = tf.sequential({ layers });
         this.model.compile({
-            optimizer: tf.train.adam(0.0015),
+            optimizer: tf.train.adam(0.0015), // fixed LR (no setLearningRate)
             loss: 'binaryCrossentropy',
             metrics: ['binaryAccuracy']
         });
@@ -69,7 +67,6 @@ class GRUModel {
                     shuffle: true,
                     validationData: [X_test, y_test],
                     callbacks: [
-                        this._makeLRSchedule(epochs, 0.0015, 0.0004),
                         this._makeEarlyStop(6),
                         {
                             onEpochEnd: (epoch, logs) => {
@@ -96,7 +93,7 @@ class GRUModel {
         return this.model.predict(X);
     }
 
-    // Wider threshold sweep (0.2–0.8) can add a few points without retraining
+    // Wider threshold sweep (0.2–0.8) to squeeze accuracy without retraining
     setThresholdsFromValidation(yTrue, yPred) {
         const yT = yTrue.arraySync();
         const yP = yPred.arraySync();
@@ -122,7 +119,6 @@ class GRUModel {
     evaluatePerStock(yTrue, yPred, symbols, horizon = 3) {
         const yT = yTrue.arraySync();
         const yP = yPred.arraySync();
-
         const stockAccuracies = {};
         const stockPredictions = {};
 
