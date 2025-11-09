@@ -2,14 +2,13 @@ class GRUModel {
     constructor(inputShape, outputSize) {
         this.model = null;
         this.inputShape = inputShape;   // [12, 20]
-        this.outputSize = outputSize;   // 30 (10*3)
+        this.outputSize = outputSize;   // 30 (10 stocks × 3 steps)
         this.history = null;
-        // Per-output thresholds (stock×horizon), default 0.5
-        this.thresholds = Array(outputSize).fill(0.5);
+        this.thresholds = Array(outputSize).fill(0.5); // per-output tuned thresholds
     }
 
     // Early stopping on val_binaryAccuracy
-    _makeEarlyStop(patience = 3) {
+    _makeEarlyStop(patience = 4) {
         let best = -Infinity, wait = 0;
         return {
             onEpochEnd: (_epoch, logs) => {
@@ -21,37 +20,50 @@ class GRUModel {
     }
 
     buildModel() {
-        // FAST: stacked unidirectional GRUs -> Dense(30, sigmoid)
+        // Spec: Stacked GRU (browser-friendly), then Dense(30, sigmoid)
         const layers = [];
-        layers.push(tf.layers.gru({ units: 24, returnSequences: true, inputShape: this.inputShape }));
-        layers.push(tf.layers.dropout({ rate: 0.1 }));
-        layers.push(tf.layers.gru({ units: 12, returnSequences: false }));
-        layers.push(tf.layers.dropout({ rate: 0.1 }));
-        layers.push(tf.layers.dense({ units: this.outputSize, activation: 'sigmoid' }));
+        layers.push(tf.layers.gru({
+            units: 32,
+            returnSequences: true,
+            inputShape: this.inputShape,
+            dropout: 0.15,
+            recurrentDropout: 0.1
+        }));
+        layers.push(tf.layers.gru({
+            units: 16,
+            returnSequences: false,
+            dropout: 0.15,
+            recurrentDropout: 0.1
+        }));
+        layers.push(tf.layers.dense({
+            units: this.outputSize,
+            activation: 'sigmoid',
+            kernelRegularizer: tf.regularizers.l2({ l2: 1e-4 })
+        }));
 
         this.model = tf.sequential({ layers });
         this.model.compile({
-            optimizer: tf.train.adam(0.002), // a bit higher LR for faster convergence
+            optimizer: tf.train.adam(0.0015),
             loss: 'binaryCrossentropy',
             metrics: ['binaryAccuracy']
         });
         return this.model;
     }
 
-    async train(X_train, y_train, X_test, y_test, epochs = 12, batchSize = 64) {
+    async train(X_train, y_train, X_test, y_test, epochs = 18, batchSize = 48) {
         if (!this.model) this.buildModel();
 
-        // Try larger -> smaller batches for weaker devices
-        const tryBatches = [batchSize, 48, 32, 16, 8];
+        const tryBatches = [batchSize, 32, 24, 16, 8];
         let lastErr = null;
         for (const bs of tryBatches) {
             try {
                 this.history = await this.model.fit(X_train, y_train, {
                     epochs,
                     batchSize: bs,
+                    shuffle: true,
                     validationData: [X_test, y_test],
                     callbacks: [
-                        this._makeEarlyStop(3),
+                        this._makeEarlyStop(4),
                         {
                             onEpochEnd: (epoch, logs) => {
                                 const p = document.getElementById('trainingProgress');
@@ -77,7 +89,7 @@ class GRUModel {
         return this.model.predict(X);
     }
 
-    // Tune thresholds (0.3–0.7) on validation predictions to maximize accuracy
+    // Threshold sweep per output (0.3–0.7) using validation preds
     setThresholdsFromValidation(yTrue, yPred) {
         const yT = yTrue.arraySync();
         const yP = yPred.arraySync();
