@@ -59,37 +59,44 @@ class DataLoader {
         this.stocksData = data;
     }
 
+    // Switch to z-score (per stock) for better signal/scale handling than min-max
     normalizeData() {
         if (!this.stocksData) throw new Error('No data loaded');
-        this.normalizedData = {};
-        const minMax = {};
 
-        // Min/max for Open & Close only
-        this.symbols.forEach(symbol => {
-            minMax[symbol] = {
-                Open:  { min: Infinity, max: -Infinity },
-                Close: { min: Infinity, max: -Infinity }
-            };
-            this.dates.forEach(date => {
-                const p = this.stocksData[symbol][date];
+        // compute mean/std per stock & feature
+        const stats = {};
+        this.symbols.forEach(sym => {
+            let sumO=0, sumC=0, cnt=0;
+            this.dates.forEach(d => {
+                const p = this.stocksData[sym][d];
                 if (!p) return;
-                minMax[symbol].Open.min  = Math.min(minMax[symbol].Open.min,  p.Open);
-                minMax[symbol].Open.max  = Math.max(minMax[symbol].Open.max,  p.Open);
-                minMax[symbol].Close.min = Math.min(minMax[symbol].Close.min, p.Close);
-                minMax[symbol].Close.max = Math.max(minMax[symbol].Close.max, p.Close);
+                sumO += p.Open; sumC += p.Close; cnt++;
             });
+            const meanO = cnt ? sumO/cnt : 0;
+            const meanC = cnt ? sumC/cnt : 0;
+            let varO=0, varC=0;
+            this.dates.forEach(d => {
+                const p = this.stocksData[sym][d];
+                if (!p) return;
+                varO += (p.Open-meanO)*(p.Open-meanO);
+                varC += (p.Close-meanC)*(p.Close-meanC);
+            });
+            const stdO = cnt>1 ? Math.sqrt(varO/(cnt-1)) : 1;
+            const stdC = cnt>1 ? Math.sqrt(varC/(cnt-1)) : 1;
+            stats[sym] = { meanO, meanC, stdO: stdO || 1, stdC: stdC || 1 };
         });
 
-        this.symbols.forEach(symbol => {
-            this.normalizedData[symbol] = {};
-            this.dates.forEach(date => {
-                const p = this.stocksData[symbol][date];
+        // normalize
+        this.normalizedData = {};
+        this.symbols.forEach(sym => {
+            this.normalizedData[sym] = {};
+            const {meanO, meanC, stdO, stdC} = stats[sym];
+            this.dates.forEach(d => {
+                const p = this.stocksData[sym][d];
                 if (!p) return;
-                const nOpen  = (minMax[symbol].Open.max  - minMax[symbol].Open.min)  || 1;
-                const nClose = (minMax[symbol].Close.max - minMax[symbol].Close.min) || 1;
-                this.normalizedData[symbol][date] = {
-                    Open:  (p.Open  - minMax[symbol].Open.min)  / nOpen,
-                    Close: (p.Close - minMax[symbol].Close.min) / nClose
+                this.normalizedData[sym][d] = {
+                    Open:  (p.Open  - meanO) / stdO,
+                    Close: (p.Close - meanC) / stdC
                 };
             });
         });
