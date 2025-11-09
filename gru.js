@@ -2,44 +2,50 @@ class GRUModel {
     constructor(inputShape, outputSize) {
         this.model = null;
         this.inputShape = inputShape;   // [12, 20]
-        this.outputSize = outputSize;   // 30 (10 stocks × 3 steps)
+        this.outputSize = outputSize;   // 30 (10*3)
         this.history = null;
-        this.thresholds = Array(outputSize).fill(0.5); // per-output tuned thresholds
+        this.thresholds = Array(outputSize).fill(0.5);
+        this._minEpochs = 10; // don't stop before this
     }
 
-    // Early stopping on val_binaryAccuracy
-    _makeEarlyStop(patience = 4) {
+    _makeEarlyStop(patience = 6) {
         let best = -Infinity, wait = 0;
+        let epochCount = 0;
         return {
             onEpochEnd: (_epoch, logs) => {
+                epochCount++;
                 const v = logs.val_binaryAccuracy ?? 0;
                 if (v > best + 1e-4) { best = v; wait = 0; } else { wait++; }
-                if (wait >= patience) this.model.stopTraining = true;
+                if (epochCount >= this._minEpochs && wait >= patience) {
+                    this.model.stopTraining = true;
+                }
+            }
+        };
+    }
+
+    _makeLRSchedule(totalEpochs, lrStart = 0.0015, lrEnd = 0.0003) {
+        return {
+            onEpochBegin: (epoch) => {
+                const t = epoch / Math.max(1, totalEpochs - 1);
+                // cosine decay
+                const lr = lrEnd + 0.5 * (lrStart - lrEnd) * (1 + Math.cos(Math.PI * t));
+                this.model.optimizer.setLearningRate(lr);
             }
         };
     }
 
     buildModel() {
-        // Spec: Stacked GRU (browser-friendly), then Dense(30, sigmoid)
+        // Stacked GRU → Dense(30 sigmoid) per spec; slightly larger for accuracy
         const layers = [];
         layers.push(tf.layers.gru({
-            units: 32,
-            returnSequences: true,
-            inputShape: this.inputShape,
-            dropout: 0.15,
-            recurrentDropout: 0.1
+            units: 48, returnSequences: true, inputShape: this.inputShape,
+            dropout: 0.1, recurrentDropout: 0.05
         }));
         layers.push(tf.layers.gru({
-            units: 16,
-            returnSequences: false,
-            dropout: 0.15,
-            recurrentDropout: 0.1
+            units: 24, returnSequences: false,
+            dropout: 0.1, recurrentDropout: 0.05
         }));
-        layers.push(tf.layers.dense({
-            units: this.outputSize,
-            activation: 'sigmoid',
-            kernelRegularizer: tf.regularizers.l2({ l2: 1e-4 })
-        }));
+        layers.push(tf.layers.dense({ units: this.outputSize, activation: 'sigmoid' }));
 
         this.model = tf.sequential({ layers });
         this.model.compile({
@@ -50,10 +56,10 @@ class GRUModel {
         return this.model;
     }
 
-    async train(X_train, y_train, X_test, y_test, epochs = 18, batchSize = 48) {
+    async train(X_train, y_train, X_test, y_test, epochs = 28, batchSize = 64) {
         if (!this.model) this.buildModel();
 
-        const tryBatches = [batchSize, 32, 24, 16, 8];
+        const tryBatches = [batchSize, 48, 32, 24, 16];
         let lastErr = null;
         for (const bs of tryBatches) {
             try {
@@ -63,7 +69,8 @@ class GRUModel {
                     shuffle: true,
                     validationData: [X_test, y_test],
                     callbacks: [
-                        this._makeEarlyStop(4),
+                        this._makeLRSchedule(epochs, 0.0015, 0.0004),
+                        this._makeEarlyStop(6),
                         {
                             onEpochEnd: (epoch, logs) => {
                                 const p = document.getElementById('trainingProgress');
@@ -89,12 +96,12 @@ class GRUModel {
         return this.model.predict(X);
     }
 
-    // Threshold sweep per output (0.3–0.7) using validation preds
+    // Wider threshold sweep (0.2–0.8) can add a few points without retraining
     setThresholdsFromValidation(yTrue, yPred) {
         const yT = yTrue.arraySync();
         const yP = yPred.arraySync();
         const grid = [];
-        for (let t = 0.3; t <= 0.7; t += 0.02) grid.push(parseFloat(t.toFixed(2)));
+        for (let t = 0.2; t <= 0.8; t += 0.01) grid.push(parseFloat(t.toFixed(2)));
 
         for (let k = 0; k < this.outputSize; k++) {
             let bestT = 0.5, bestAcc = -1;
