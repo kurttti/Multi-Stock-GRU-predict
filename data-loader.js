@@ -9,7 +9,7 @@ class DataLoader {
         this.X_test = null;
         this.y_test = null;
         this.testDates = [];
-        // Features per stock: Open, Close, High, Low, CloseReturn (5)
+        // EXACT spec: 2 features per stock (Open, Close) -> input (12, 20)
         this.numFeaturesPerStock = 0;
     }
 
@@ -40,9 +40,7 @@ class DataLoader {
             if (values.length !== headers.length) continue;
 
             const row = {};
-            headers.forEach((header, index) => {
-                row[header.trim()] = values[index].trim();
-            });
+            headers.forEach((header, index) => row[header.trim()] = values[index].trim());
 
             const symbol = row.Symbol;
             const date = row.Date;
@@ -52,10 +50,7 @@ class DataLoader {
             if (!data[symbol]) data[symbol] = {};
             data[symbol][date] = {
                 Open: parseFloat(row.Open),
-                Close: parseFloat(row.Close),
-                High: parseFloat(row.High),
-                Low: parseFloat(row.Low),
-                Volume: parseFloat(row.Volume)
+                Close: parseFloat(row.Close)
             };
         }
 
@@ -69,64 +64,43 @@ class DataLoader {
         this.normalizedData = {};
         const minMax = {};
 
-        // Track min/max for Open/Close/High/Low and CloseReturn (close-to-previous-close)
+        // Min/max for Open & Close only
         this.symbols.forEach(symbol => {
             minMax[symbol] = {
-                Open: { min: Infinity, max: -Infinity },
-                Close:{ min: Infinity, max: -Infinity },
-                High: { min: Infinity, max: -Infinity },
-                Low:  { min: Infinity, max: -Infinity },
-                CloseReturn: { min: Infinity, max: -Infinity }
+                Open:  { min: Infinity, max: -Infinity },
+                Close: { min: Infinity, max: -Infinity }
             };
-
-            let prevClose = null;
             this.dates.forEach(date => {
                 const p = this.stocksData[symbol][date];
                 if (!p) return;
-                // prices
                 minMax[symbol].Open.min  = Math.min(minMax[symbol].Open.min,  p.Open);
                 minMax[symbol].Open.max  = Math.max(minMax[symbol].Open.max,  p.Open);
                 minMax[symbol].Close.min = Math.min(minMax[symbol].Close.min, p.Close);
                 minMax[symbol].Close.max = Math.max(minMax[symbol].Close.max, p.Close);
-                minMax[symbol].High.min  = Math.min(minMax[symbol].High.min,  p.High);
-                minMax[symbol].High.max  = Math.max(minMax[symbol].High.max,  p.High);
-                minMax[symbol].Low.min   = Math.min(minMax[symbol].Low.min,   p.Low);
-                minMax[symbol].Low.max   = Math.max(minMax[symbol].Low.max,   p.Low);
-                // close-to-close momentum
-                const ret = prevClose ? (p.Close - prevClose) / prevClose : 0;
-                minMax[symbol].CloseReturn.min = Math.min(minMax[symbol].CloseReturn.min, ret);
-                minMax[symbol].CloseReturn.max = Math.max(minMax[symbol].CloseReturn.max, ret);
-                prevClose = p.Close;
             });
         });
 
-        // Normalize to [0,1]
         this.symbols.forEach(symbol => {
             this.normalizedData[symbol] = {};
-            let prevClose = null;
             this.dates.forEach(date => {
                 const p = this.stocksData[symbol][date];
                 if (!p) return;
-                const norm = {};
-                ['Open','Close','High','Low'].forEach(k => {
-                    const d = (minMax[symbol][k].max - minMax[symbol][k].min);
-                    norm[k] = d === 0 ? 0 : (p[k] - minMax[symbol][k].min) / d;
-                });
-                const ret = prevClose ? (p.Close - prevClose) / prevClose : 0;
-                const dr = (minMax[symbol].CloseReturn.max - minMax[symbol].CloseReturn.min);
-                norm.CloseReturn = dr === 0 ? 0 : (ret - minMax[symbol].CloseReturn.min) / dr;
-                prevClose = p.Close;
-
-                this.normalizedData[symbol][date] = norm;
+                const nOpen  = (minMax[symbol].Open.max  - minMax[symbol].Open.min)  || 1;
+                const nClose = (minMax[symbol].Close.max - minMax[symbol].Close.min) || 1;
+                this.normalizedData[symbol][date] = {
+                    Open:  (p.Open  - minMax[symbol].Open.min)  / nOpen,
+                    Close: (p.Close - minMax[symbol].Close.min) / nClose
+                };
             });
         });
 
-        this.numFeaturesPerStock = Object.keys(this.normalizedData[this.symbols[0]][this.dates[0]]).length; // 5
+        this.numFeaturesPerStock = 2; // (Open, Close)
         return this.normalizedData;
     }
 
     createSequences(sequenceLength = 12, predictionHorizon = 3) {
         if (!this.normalizedData) this.normalizeData();
+
         const sequences = [];
         const targets = [];
         const validDates = [];
@@ -136,18 +110,20 @@ class DataLoader {
             const seq = [];
             let ok = true;
 
+            // Build 12×(10*2)=12×20 inputs
             for (let j = sequenceLength - 1; j >= 0; j--) {
                 const d = this.dates[i - j];
                 const step = [];
                 this.symbols.forEach(sym => {
                     const n = this.normalizedData[sym][d];
                     if (!n) { ok = false; return; }
-                    step.push(n.Open, n.Close, n.High, n.Low, n.CloseReturn);
+                    step.push(n.Open, n.Close);
                 });
                 if (ok) seq.push(step);
             }
             if (!ok) continue;
 
+            // Labels: for each stock compare Close(D+offset) vs Close(D)
             const baseClose = this.symbols.map(sym => this.stocksData[sym][currentDate].Close);
             const tgt = [];
             for (let off = 1; off <= predictionHorizon; off++) {
