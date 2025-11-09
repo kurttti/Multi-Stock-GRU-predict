@@ -8,7 +8,6 @@ class StockPredictionApp {
         this.currentPredictions = null;
         this.accuracyChart = null;
         this.isTraining = false;
-        // Initialise TFJS backend and update backend label
         this.initBackend();
         this.initializeEventListeners();
     }
@@ -17,13 +16,9 @@ class StockPredictionApp {
         try {
             await tf.setBackend('webgl').catch(() => tf.setBackend('cpu'));
             await tf.ready();
-            const info = `TFJS ${tf.version_core} | backend: ${tf.getBackend()}`;
             const el = document.getElementById('backendInfo');
-            if (el) el.textContent = info;
-            console.log(info);
-        } catch (err) {
-            console.warn('Backend init error:', err);
-        }
+            if (el) el.textContent = `TFJS ${tf.version_core} | backend: ${tf.getBackend()}`;
+        } catch {}
     }
 
     initializeEventListeners() {
@@ -60,6 +55,7 @@ class StockPredictionApp {
             const { X_train, y_train, X_test, y_test, symbols } = this.dataLoader;
             const numFeatures = this.dataLoader.numFeaturesPerStock || 2;
             this.model = new GRUModel([12, symbols.length * numFeatures], symbols.length * 3);
+
             this.updateStatus('Training model...');
             await this.model.train(X_train, y_train, X_test, y_test, 20, 32);
             document.getElementById('predictBtn').disabled = false;
@@ -73,19 +69,22 @@ class StockPredictionApp {
     }
 
     async runPrediction() {
-        if (!this.model) {
-            alert('Please train the model first');
-            return;
-        }
+        if (!this.model) { alert('Please train the model first'); return; }
         try {
             this.updateStatus('Running predictions...');
             const { X_test, y_test, symbols } = this.dataLoader;
-            const preds = await this.model.predict(X_test);
-            const evaln = this.model.evaluatePerStock(y_test, preds, symbols);
-            this.currentPredictions = evaln;
-            this.visualizeResults(evaln);
+
+            // Raw predictions
+            const rawPreds = await this.model.predict(X_test);
+            // Tune thresholds on validation split
+            this.model.setThresholdsFromValidation(y_test, rawPreds, 3);
+            // Evaluate using tuned thresholds
+            const evaluation = this.model.evaluatePerStock(y_test, rawPreds, symbols, 3);
+
+            this.currentPredictions = evaluation;
+            this.visualizeResults(evaluation);
             this.updateStatus('Prediction completed. Results displayed below.');
-            preds.dispose();
+            rawPreds.dispose();
         } catch (error) {
             this.updateStatus(`Prediction error: ${error.message}`);
             console.error(error);
@@ -107,25 +106,10 @@ class StockPredictionApp {
         if (this.accuracyChart) this.accuracyChart.destroy();
         this.accuracyChart = new Chart(ctx, {
             type: 'bar',
-            data: {
-                labels,
-                datasets: [{
-                    label: 'Accuracy (%)',
-                    data: values,
-                    backgroundColor: colours,
-                    borderColor: borders,
-                    borderWidth: 1
-                }]
-            },
+            data: { labels, datasets: [{ label: 'Accuracy (%)', data: values, backgroundColor: colours, borderColor: borders, borderWidth: 1 }]},
             options: {
                 indexAxis: 'y',
-                scales: {
-                    x: {
-                        beginAtZero: true,
-                        max: 100,
-                        title: { display: true, text: 'Accuracy (%)' }
-                    }
-                },
+                scales: { x: { beginAtZero: true, max: 100, title: { display: true, text: 'Accuracy (%)' } } },
                 plugins: { legend: { display: false } }
             }
         });
@@ -136,14 +120,16 @@ class StockPredictionApp {
         container.innerHTML = '';
         const topStock = Object.entries(accuracies).sort(([, a], [, b]) => b - a)[0][0];
         const stockPreds = predictions[topStock] || [];
-        const div = document.createElement('div');
-        div.className = 'stock-chart';
-        div.innerHTML = `<h4>${topStock} Prediction Timeline</h4><canvas id="timeline-chart"></canvas>`;
-        container.appendChild(div);
+        const el = document.createElement('div');
+        el.className = 'stock-chart';
+        el.innerHTML = `<h4>${topStock} Prediction Timeline</h4><canvas id="timeline-chart"></canvas>`;
+        container.appendChild(el);
+
         const ctx = document.getElementById('timeline-chart').getContext('2d');
         const sample = stockPreds.slice(0, Math.min(50, stockPreds.length));
         const data = sample.map(p => p.correct ? 1 : 0);
         const labels = sample.map((_, i) => `Pred ${i + 1}`);
+
         new Chart(ctx, {
             type: 'line',
             data: {
@@ -159,15 +145,7 @@ class StockPredictionApp {
                 }]
             },
             options: {
-                scales: {
-                    y: {
-                        min: 0,
-                        max: 1,
-                        ticks: {
-                            callback: v => v === 1 ? 'Correct' : v === 0 ? 'Wrong' : ''
-                        }
-                    }
-                },
+                scales: { y: { min: 0, max: 1, ticks: { callback: v => v === 1 ? 'Correct' : v === 0 ? 'Wrong' : '' } } },
                 plugins: { legend: { display: false } }
             }
         });
@@ -176,12 +154,6 @@ class StockPredictionApp {
     updateStatus(text) {
         const el = document.getElementById('status');
         if (el) el.textContent = text;
-    }
-
-    dispose() {
-        if (this.dataLoader) this.dataLoader.dispose();
-        if (this.model) this.model.dispose();
-        if (this.accuracyChart) this.accuracyChart.destroy();
     }
 }
 
