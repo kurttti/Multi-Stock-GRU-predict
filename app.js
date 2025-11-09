@@ -33,7 +33,7 @@ class StockPredictionApp {
         try {
             this.updateStatus('Loading CSV...');
             await this.dataLoader.loadCSV(file);
-            this.updateStatus('Preprocessing data...');
+            this.updateStatus('Preprocessing data (MinMax, Open & Close)…');
             this.dataLoader.createSequences();
             document.getElementById('trainBtn').disabled = false;
             this.updateStatus('Data loaded. Click Train Model to begin training.');
@@ -50,11 +50,11 @@ class StockPredictionApp {
         document.getElementById('predictBtn').disabled = true;
         try {
             const { X_train, y_train, X_test, y_test, symbols } = this.dataLoader;
-            const numFeatures = this.dataLoader.numFeaturesPerStock || 2; // 2 -> 20 dims total
+            const numFeatures = this.dataLoader.numFeaturesPerStock || 2; // 2 → 20 dims
             this.model = new GRUModel([12, symbols.length * numFeatures], symbols.length * 3);
 
             this.updateStatus('Training model...');
-            await this.model.train(X_train, y_train, X_test, y_test, 18, 48);
+            await this.model.train(X_train, y_train, X_test, y_test, 28, 64); // longer, but ES+LR schedule
             document.getElementById('predictBtn').disabled = false;
             this.updateStatus('Training completed. Click Run Prediction to evaluate.');
         } catch (error) {
@@ -68,11 +68,11 @@ class StockPredictionApp {
     async runPrediction() {
         if (!this.model) { alert('Please train the model first'); return; }
         try {
-            this.updateStatus('Running predictions...');
+            this.updateStatus('Running predictions & tuning thresholds…');
             const { X_test, y_test, symbols } = this.dataLoader;
 
             const raw = await this.model.predict(X_test);
-            this.model.setThresholdsFromValidation(y_test, raw); // tuned thresholds
+            this.model.setThresholdsFromValidation(y_test, raw); // 0.2–0.8 sweep
             const evaluation = this.model.evaluatePerStock(y_test, raw, symbols, 3);
 
             this.currentPredictions = evaluation;
