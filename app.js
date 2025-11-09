@@ -8,24 +8,21 @@ class StockPredictionApp {
         this.currentPredictions = null;
         this.accuracyChart = null;
         this.isTraining = false;
-
-        // prepare TF backend immediately
-        this.tfReadyPromise = this.setupTF();
-
+        // Initialise TFJS backend and update backend label
+        this.initBackend();
         this.initializeEventListeners();
     }
 
-    async setupTF() {
+    async initBackend() {
         try {
-            // prefer WebGL for speed; fallback to CPU if not available
             await tf.setBackend('webgl').catch(() => tf.setBackend('cpu'));
             await tf.ready();
             const info = `TFJS ${tf.version_core} | backend: ${tf.getBackend()}`;
             const el = document.getElementById('backendInfo');
             if (el) el.textContent = info;
             console.log(info);
-        } catch (e) {
-            console.warn('TFJS init failed', e);
+        } catch (err) {
+            console.warn('Backend init error:', err);
         }
     }
 
@@ -33,7 +30,6 @@ class StockPredictionApp {
         const fileInput = document.getElementById('csvFile');
         const trainBtn = document.getElementById('trainBtn');
         const predictBtn = document.getElementById('predictBtn');
-
         fileInput.addEventListener('change', (e) => this.handleFileUpload(e));
         trainBtn.addEventListener('click', () => this.trainModel());
         predictBtn.addEventListener('click', () => this.runPrediction());
@@ -42,48 +38,34 @@ class StockPredictionApp {
     async handleFileUpload(event) {
         const file = event.target.files[0];
         if (!file) return;
-
         try {
-            await this.tfReadyPromise;
-
-            document.getElementById('status').textContent = 'Loading CSV...';
+            this.updateStatus('Loading CSV...');
             await this.dataLoader.loadCSV(file);
-            
-            document.getElementById('status').textContent = 'Preprocessing data...';
+            this.updateStatus('Preprocessing data...');
             this.dataLoader.createSequences();
-            
             document.getElementById('trainBtn').disabled = false;
-            document.getElementById('status').textContent = 'Data loaded. Click Train Model to begin training.';
-            
+            this.updateStatus('Data loaded. Click Train Model to begin training.');
         } catch (error) {
-            document.getElementById('status').textContent = `Error: ${error.message}`;
+            this.updateStatus(`Error: ${error.message}`);
             console.error(error);
         }
     }
 
     async trainModel() {
         if (this.isTraining) return;
-        await this.tfReadyPromise;
-        
         this.isTraining = true;
         document.getElementById('trainBtn').disabled = true;
         document.getElementById('predictBtn').disabled = true;
-
         try {
             const { X_train, y_train, X_test, y_test, symbols } = this.dataLoader;
-
-            const numFeatures = this.dataLoader.numFeaturesPerStock || 2; // 6 with new features
+            const numFeatures = this.dataLoader.numFeaturesPerStock || 2;
             this.model = new GRUModel([12, symbols.length * numFeatures], symbols.length * 3);
-            
-            document.getElementById('status').textContent = 'Training model...';
-            // a few extra epochs, browser-friendly
-            await this.model.train(X_train, y_train, X_test, y_test, 60, 32);
-            
+            this.updateStatus('Training model...');
+            await this.model.train(X_train, y_train, X_test, y_test, 20, 32);
             document.getElementById('predictBtn').disabled = false;
-            document.getElementById('status').textContent = 'Training completed. Click Run Prediction to evaluate.';
-            
+            this.updateStatus('Training completed. Click Run Prediction to evaluate.');
         } catch (error) {
-            document.getElementById('status').textContent = `Training error: ${error.message}`;
+            this.updateStatus(`Training error: ${error.message}`);
             console.error(error);
         } finally {
             this.isTraining = false;
@@ -95,111 +77,105 @@ class StockPredictionApp {
             alert('Please train the model first');
             return;
         }
-
         try {
-            document.getElementById('status').textContent = 'Running predictions...';
+            this.updateStatus('Running predictions...');
             const { X_test, y_test, symbols } = this.dataLoader;
-            
-            const predictions = await this.model.predict(X_test);
-            const evaluation = this.model.evaluatePerStock(y_test, predictions, symbols);
-            
-            this.currentPredictions = evaluation;
-            this.visualizeResults(evaluation, symbols);
-            
-            document.getElementById('status').textContent = 'Prediction completed. Results displayed below.';
-            predictions.dispose();
+            const preds = await this.model.predict(X_test);
+            const evaln = this.model.evaluatePerStock(y_test, preds, symbols);
+            this.currentPredictions = evaln;
+            this.visualizeResults(evaln);
+            this.updateStatus('Prediction completed. Results displayed below.');
+            preds.dispose();
         } catch (error) {
-            document.getElementById('status').textContent = `Prediction error: ${error.message}`;
+            this.updateStatus(`Prediction error: ${error.message}`);
             console.error(error);
         }
     }
 
-    visualizeResults(evaluation, symbols) {
-        this.createAccuracyChart(evaluation.stockAccuracies, symbols);
-        this.createTimelineCharts(evaluation.stockPredictions, evaluation.stockAccuracies);
+    visualizeResults(evaluation) {
+        this.createAccuracyChart(evaluation.stockAccuracies);
+        this.createTimelineChart(evaluation.stockPredictions, evaluation.stockAccuracies);
     }
 
-    createAccuracyChart(accuracies, symbols) {
+    createAccuracyChart(accuracies) {
         const ctx = document.getElementById('accuracyChart').getContext('2d');
-        const sortedEntries = Object.entries(accuracies).sort(([,a], [,b]) => b - a);
-        const sortedSymbols = sortedEntries.map(([symbol]) => symbol);
-        const sortedAccuracies = sortedEntries.map(([, acc]) => acc * 100);
-
+        const sorted = Object.entries(accuracies).sort(([, a], [, b]) => b - a);
+        const labels = sorted.map(([s]) => s);
+        const values = sorted.map(([, a]) => a * 100);
+        const colours = values.map((v, i) => i === 0 ? 'rgba(0, 191, 255, 0.8)' : 'rgba(255, 165, 0, 0.8)');
+        const borders = values.map((v, i) => i === 0 ? 'rgb(0, 191, 255)' : 'rgb(255, 165, 0)');
         if (this.accuracyChart) this.accuracyChart.destroy();
-
         this.accuracyChart = new Chart(ctx, {
             type: 'bar',
             data: {
-                labels: sortedSymbols,
+                labels,
                 datasets: [{
-                    label: 'Prediction Accuracy (%)',
-                    data: sortedAccuracies,
-                    backgroundColor: 'rgba(75, 192, 192, 0.8)',
-                    borderColor: 'rgb(75, 192, 192)',
+                    label: 'Accuracy (%)',
+                    data: values,
+                    backgroundColor: colours,
+                    borderColor: borders,
                     borderWidth: 1
                 }]
             },
             options: {
                 indexAxis: 'y',
                 scales: {
-                    x: { beginAtZero: true, max: 100, title: { display: true, text: 'Accuracy (%)' } }
+                    x: {
+                        beginAtZero: true,
+                        max: 100,
+                        title: { display: true, text: 'Accuracy (%)' }
+                    }
                 },
                 plugins: { legend: { display: false } }
             }
         });
     }
 
-    createTimelineCharts(predictions, accuracies) {
+    createTimelineChart(predictions, accuracies) {
         const container = document.getElementById('timelineContainer');
         container.innerHTML = '';
-
-        const topStocks = Object.entries(accuracies)
-            .sort(([,a], [,b]) => b - a)
-            .map(([s]) => s)
-            .slice(0, 3);
-
-        topStocks.forEach(symbol => {
-            const stockPredictions = predictions[symbol] || [];
-            const chartContainer = document.createElement('div');
-            chartContainer.className = 'stock-chart';
-            chartContainer.innerHTML = `<h4>${symbol} Prediction Timeline</h4><canvas id="timeline-${symbol}"></canvas>`;
-            container.appendChild(chartContainer);
-
-            const ctx = document.getElementById(`timeline-${symbol}`).getContext('2d');
-            const sampleSize = Math.min(50, stockPredictions.length);
-            const sampleData = stockPredictions.slice(0, sampleSize);
-            const correctData = sampleData.map(p => p.correct ? 1 : 0);
-            const labels = sampleData.map((_, i) => `#${i + 1}`);
-
-            new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels,
-                    datasets: [{
-                        label: 'Correct(1)/Wrong(0)',
-                        data: correctData,
-                        borderColor: 'rgb(75, 192, 192)',
-                        backgroundColor: 'rgba(75, 192, 192, 0.2)',
-                        fill: true,
-                        tension: 0.4,
-                        pointBackgroundColor: sampleData.map(p => p.correct ? 'rgb(75, 192, 192)' : 'rgb(255, 99, 132)')
-                    }]
-                },
-                options: {
-                    scales: { y: { min: 0, max: 1, ticks: { callback: v => (v === 1 ? 'Correct' : v === 0 ? 'Wrong' : '') } } },
-                    plugins: {
-                        tooltip: {
-                            callbacks: {
-                                label: (ctx) => {
-                                    const pred = sampleData[ctx.dataIndex];
-                                    return `Pred: ${pred.pred ? 'Up' : 'Down'} | Actual: ${pred.true ? 'Up' : 'Down'}`;
-                                }
-                            }
+        const topStock = Object.entries(accuracies).sort(([, a], [, b]) => b - a)[0][0];
+        const stockPreds = predictions[topStock] || [];
+        const div = document.createElement('div');
+        div.className = 'stock-chart';
+        div.innerHTML = `<h4>${topStock} Prediction Timeline</h4><canvas id="timeline-chart"></canvas>`;
+        container.appendChild(div);
+        const ctx = document.getElementById('timeline-chart').getContext('2d');
+        const sample = stockPreds.slice(0, Math.min(50, stockPreds.length));
+        const data = sample.map(p => p.correct ? 1 : 0);
+        const labels = sample.map((_, i) => `Pred ${i + 1}`);
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [{
+                    label: 'Correct Predictions',
+                    data,
+                    borderColor: 'rgb(0, 191, 255)',
+                    backgroundColor: 'rgba(0, 191, 255, 0.2)',
+                    fill: true,
+                    tension: 0.4,
+                    pointBackgroundColor: sample.map(p => p.correct ? 'rgb(0, 191, 255)' : 'rgb(255, 99, 132)')
+                }]
+            },
+            options: {
+                scales: {
+                    y: {
+                        min: 0,
+                        max: 1,
+                        ticks: {
+                            callback: v => v === 1 ? 'Correct' : v === 0 ? 'Wrong' : ''
                         }
                     }
-                }
-            });
+                },
+                plugins: { legend: { display: false } }
+            }
         });
+    }
+
+    updateStatus(text) {
+        const el = document.getElementById('status');
+        if (el) el.textContent = text;
     }
 
     dispose() {
