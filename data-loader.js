@@ -9,7 +9,7 @@ class DataLoader {
         this.X_test = null;
         this.y_test = null;
         this.testDates = [];
-        // EXACT spec: 2 features per stock (Open, Close) -> input (12, 20)
+        // EXACT spec: 2 features per stock (Open, Close) → input (12, 20)
         this.numFeaturesPerStock = 0;
     }
 
@@ -59,49 +59,43 @@ class DataLoader {
         this.stocksData = data;
     }
 
-    // Switch to z-score (per stock) for better signal/scale handling than min-max
+    // MinMax per stock (as in original spec)
     normalizeData() {
         if (!this.stocksData) throw new Error('No data loaded');
 
-        // compute mean/std per stock & feature
-        const stats = {};
+        const minMax = {};
         this.symbols.forEach(sym => {
-            let sumO=0, sumC=0, cnt=0;
+            minMax[sym] = {
+                Open:  { min: Infinity, max: -Infinity },
+                Close: { min: Infinity, max: -Infinity }
+            };
             this.dates.forEach(d => {
                 const p = this.stocksData[sym][d];
                 if (!p) return;
-                sumO += p.Open; sumC += p.Close; cnt++;
+                minMax[sym].Open.min  = Math.min(minMax[sym].Open.min,  p.Open);
+                minMax[sym].Open.max  = Math.max(minMax[sym].Open.max,  p.Open);
+                minMax[sym].Close.min = Math.min(minMax[sym].Close.min, p.Close);
+                minMax[sym].Close.max = Math.max(minMax[sym].Close.max, p.Close);
             });
-            const meanO = cnt ? sumO/cnt : 0;
-            const meanC = cnt ? sumC/cnt : 0;
-            let varO=0, varC=0;
-            this.dates.forEach(d => {
-                const p = this.stocksData[sym][d];
-                if (!p) return;
-                varO += (p.Open-meanO)*(p.Open-meanO);
-                varC += (p.Close-meanC)*(p.Close-meanC);
-            });
-            const stdO = cnt>1 ? Math.sqrt(varO/(cnt-1)) : 1;
-            const stdC = cnt>1 ? Math.sqrt(varC/(cnt-1)) : 1;
-            stats[sym] = { meanO, meanC, stdO: stdO || 1, stdC: stdC || 1 };
         });
 
-        // normalize
         this.normalizedData = {};
         this.symbols.forEach(sym => {
             this.normalizedData[sym] = {};
-            const {meanO, meanC, stdO, stdC} = stats[sym];
+            const mm = minMax[sym];
+            const dOpen  = (mm.Open.max  - mm.Open.min)  || 1;
+            const dClose = (mm.Close.max - mm.Close.min) || 1;
             this.dates.forEach(d => {
                 const p = this.stocksData[sym][d];
                 if (!p) return;
                 this.normalizedData[sym][d] = {
-                    Open:  (p.Open  - meanO) / stdO,
-                    Close: (p.Close - meanC) / stdC
+                    Open:  (p.Open  - mm.Open.min)  / dOpen,
+                    Close: (p.Close - mm.Close.min) / dClose
                 };
             });
         });
 
-        this.numFeaturesPerStock = 2; // (Open, Close)
+        this.numFeaturesPerStock = 2;
         return this.normalizedData;
     }
 
@@ -117,7 +111,7 @@ class DataLoader {
             const seq = [];
             let ok = true;
 
-            // Build 12×(10*2)=12×20 inputs
+            // [12, 20] input
             for (let j = sequenceLength - 1; j >= 0; j--) {
                 const d = this.dates[i - j];
                 const step = [];
@@ -130,7 +124,7 @@ class DataLoader {
             }
             if (!ok) continue;
 
-            // Labels: for each stock compare Close(D+offset) vs Close(D)
+            // Targets: compare Close(D+1/2/3) vs Close(D)
             const baseClose = this.symbols.map(sym => this.stocksData[sym][currentDate].Close);
             const tgt = [];
             for (let off = 1; off <= predictionHorizon; off++) {
