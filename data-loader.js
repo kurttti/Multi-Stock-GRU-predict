@@ -9,7 +9,7 @@ class DataLoader {
         this.X_test = null;
         this.y_test = null;
         this.testDates = [];
-        // EXACT spec: 2 features per stock (Open, Close) → input (12, 20)
+        // EXACT spec: 2 features per stock (Open, Close) → input (12,20)
         this.numFeaturesPerStock = 0;
     }
 
@@ -59,7 +59,7 @@ class DataLoader {
         this.stocksData = data;
     }
 
-    // MinMax per stock (as in original spec)
+    // MinMax per stock (as in original prompt)
     normalizeData() {
         if (!this.stocksData) throw new Error('No data loaded');
 
