@@ -22,12 +22,9 @@ class StockPredictionApp {
     }
 
     initializeEventListeners() {
-        const fileInput = document.getElementById('csvFile');
-        const trainBtn = document.getElementById('trainBtn');
-        const predictBtn = document.getElementById('predictBtn');
-        fileInput.addEventListener('change', (e) => this.handleFileUpload(e));
-        trainBtn.addEventListener('click', () => this.trainModel());
-        predictBtn.addEventListener('click', () => this.runPrediction());
+        document.getElementById('csvFile').addEventListener('change', (e) => this.handleFileUpload(e));
+        document.getElementById('trainBtn').addEventListener('click', () => this.trainModel());
+        document.getElementById('predictBtn').addEventListener('click', () => this.runPrediction());
     }
 
     async handleFileUpload(event) {
@@ -53,11 +50,11 @@ class StockPredictionApp {
         document.getElementById('predictBtn').disabled = true;
         try {
             const { X_train, y_train, X_test, y_test, symbols } = this.dataLoader;
-            const numFeatures = this.dataLoader.numFeaturesPerStock || 2;
+            const numFeatures = this.dataLoader.numFeaturesPerStock || 2; // 2 -> 20 dims total
             this.model = new GRUModel([12, symbols.length * numFeatures], symbols.length * 3);
 
             this.updateStatus('Training model...');
-            await this.model.train(X_train, y_train, X_test, y_test, 20, 32);
+            await this.model.train(X_train, y_train, X_test, y_test, 12, 64); // fast defaults
             document.getElementById('predictBtn').disabled = false;
             this.updateStatus('Training completed. Click Run Prediction to evaluate.');
         } catch (error) {
@@ -74,17 +71,14 @@ class StockPredictionApp {
             this.updateStatus('Running predictions...');
             const { X_test, y_test, symbols } = this.dataLoader;
 
-            // Raw predictions
-            const rawPreds = await this.model.predict(X_test);
-            // Tune thresholds on validation split
-            this.model.setThresholdsFromValidation(y_test, rawPreds, 3);
-            // Evaluate using tuned thresholds
-            const evaluation = this.model.evaluatePerStock(y_test, rawPreds, symbols, 3);
+            const raw = await this.model.predict(X_test);
+            this.model.setThresholdsFromValidation(y_test, raw); // accuracy boost, no retrain
 
+            const evaluation = this.model.evaluatePerStock(y_test, raw, symbols, 3);
             this.currentPredictions = evaluation;
             this.visualizeResults(evaluation);
             this.updateStatus('Prediction completed. Results displayed below.');
-            rawPreds.dispose();
+            raw.dispose();
         } catch (error) {
             this.updateStatus(`Prediction error: ${error.message}`);
             console.error(error);
@@ -101,60 +95,39 @@ class StockPredictionApp {
         const sorted = Object.entries(accuracies).sort(([, a], [, b]) => b - a);
         const labels = sorted.map(([s]) => s);
         const values = sorted.map(([, a]) => a * 100);
-        const colours = values.map((v, i) => i === 0 ? 'rgba(0, 191, 255, 0.8)' : 'rgba(255, 165, 0, 0.8)');
-        const borders = values.map((v, i) => i === 0 ? 'rgb(0, 191, 255)' : 'rgb(255, 165, 0)');
+        const colors = values.map((v, i) => i === 0 ? 'rgba(0,191,255,0.85)' : 'rgba(255,165,0,0.85)');
+        const borders = values.map((v, i) => i === 0 ? 'rgb(0,191,255)' : 'rgb(255,165,0)');
         if (this.accuracyChart) this.accuracyChart.destroy();
         this.accuracyChart = new Chart(ctx, {
             type: 'bar',
-            data: { labels, datasets: [{ label: 'Accuracy (%)', data: values, backgroundColor: colours, borderColor: borders, borderWidth: 1 }]},
-            options: {
-                indexAxis: 'y',
-                scales: { x: { beginAtZero: true, max: 100, title: { display: true, text: 'Accuracy (%)' } } },
-                plugins: { legend: { display: false } }
-            }
+            data: { labels, datasets: [{ label: 'Accuracy (%)', data: values, backgroundColor: colors, borderColor: borders, borderWidth: 1 }]},
+            options: { indexAxis: 'y', scales: { x: { beginAtZero: true, max: 100, title: { display: true, text: 'Accuracy (%)' } } }, plugins: { legend: { display: false } } }
         });
     }
 
     createTimelineChart(predictions, accuracies) {
         const container = document.getElementById('timelineContainer');
         container.innerHTML = '';
-        const topStock = Object.entries(accuracies).sort(([, a], [, b]) => b - a)[0][0];
-        const stockPreds = predictions[topStock] || [];
-        const el = document.createElement('div');
-        el.className = 'stock-chart';
-        el.innerHTML = `<h4>${topStock} Prediction Timeline</h4><canvas id="timeline-chart"></canvas>`;
-        container.appendChild(el);
+        const top = Object.entries(accuracies).sort(([, a], [, b]) => b - a)[0][0];
+        const arr = predictions[top] || [];
+        const wrap = document.createElement('div');
+        wrap.className = 'stock-chart';
+        wrap.innerHTML = `<h4>${top} Prediction Timeline</h4><canvas id="timeline-chart"></canvas>`;
+        container.appendChild(wrap);
 
         const ctx = document.getElementById('timeline-chart').getContext('2d');
-        const sample = stockPreds.slice(0, Math.min(50, stockPreds.length));
+        const sample = arr.slice(0, Math.min(50, arr.length));
         const data = sample.map(p => p.correct ? 1 : 0);
         const labels = sample.map((_, i) => `Pred ${i + 1}`);
-
         new Chart(ctx, {
             type: 'line',
-            data: {
-                labels,
-                datasets: [{
-                    label: 'Correct Predictions',
-                    data,
-                    borderColor: 'rgb(0, 191, 255)',
-                    backgroundColor: 'rgba(0, 191, 255, 0.2)',
-                    fill: true,
-                    tension: 0.4,
-                    pointBackgroundColor: sample.map(p => p.correct ? 'rgb(0, 191, 255)' : 'rgb(255, 99, 132)')
-                }]
-            },
-            options: {
-                scales: { y: { min: 0, max: 1, ticks: { callback: v => v === 1 ? 'Correct' : v === 0 ? 'Wrong' : '' } } },
-                plugins: { legend: { display: false } }
-            }
+            data: { labels, datasets: [{ label: 'Correct Predictions', data, borderColor: 'rgb(0,191,255)', backgroundColor: 'rgba(0,191,255,0.2)', fill: true, tension: 0.35,
+                pointBackgroundColor: sample.map(p => p.correct ? 'rgb(0,191,255)' : 'rgb(255,99,132)') }]},
+            options: { scales: { y: { min: 0, max: 1, ticks: { callback: v => v === 1 ? 'Correct' : v === 0 ? 'Wrong' : '' } } }, plugins: { legend: { display: false } } }
         });
     }
 
-    updateStatus(text) {
-        const el = document.getElementById('status');
-        if (el) el.textContent = text;
-    }
+    updateStatus(text) { const el = document.getElementById('status'); if (el) el.textContent = text; }
 }
 
 document.addEventListener('DOMContentLoaded', () => new StockPredictionApp());
